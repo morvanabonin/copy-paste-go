@@ -23,17 +23,13 @@ type (
 		fh      *os.File
 		created bool
 		sync.Mutex
+		dst *os.File
 	}
 
 	UrlData struct {
 		Contact uint32
 		Action  uint64
 		Time    int64
-	}
-
-	CopyControl struct {
-		src *os.File
-		dst *os.File
 	}
 )
 
@@ -70,18 +66,16 @@ func Reader(binfile string) error {
 	var err error
 
 	fh := NewFileReader(filepath.Clean(binfile))
+	dst := filepath.Dir(fh.path) + "/temp_file.bin"
+	fh.dst, err = os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0755)
 
 	if fh == nil {
 		log.Fatal("Erro na leitura do arquivo")
 	}
 
-	// fecha o arquivo
+	// fecha os arquivos
 	defer fh.Close()
-
-	cc := new(CopyControl)
-
-	cc.src = fh.fh
-	cc.dst, err = os.OpenFile("temp_file.bin", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0755)
+	defer fh.dst.Close()
 
 	if err != nil {
 		return err
@@ -110,13 +104,15 @@ func Reader(binfile string) error {
 			}()
 
 			if err != nil {
-				log.Fatalf("Houve erro no retorno de dados! [%s]", err.Error())
 
 				if errors.Is(err, io.EOF) {
-					// caso seja final do arquivo, finaliza o script
-					log.Fatalf("Fim do arquivo! [%s]", err.Error())
-					os.Exit(1)
+
+					// caso seja final do arquivo, finaliza o script e renomeia
+					RenameFile(fh.path, dst)
+					fmt.Printf("Fim do arquivo! [%s]", err.Error())
 				}
+
+				log.Fatalf("Houve erro no retorno de dados! [%s]", err.Error())
 			}
 
 			var (
@@ -128,7 +124,7 @@ func Reader(binfile string) error {
 			// NewDecoderString retorna um Decoder com decodes eficientes, diretamente de uma string com cópia zero.
 			dec := codec.NewDecoderBytes(data, &mh)
 
-			// A função Decode decodifica o stream de um leitor e aramazena o resultado um ponteiro de interface.
+			// A função Decode decodifica o stream de um leitor e aramazena o resultado em um ponteiro de interface.
 			err = dec.Decode(&urlData)
 
 			if err != nil {
@@ -136,11 +132,10 @@ func Reader(binfile string) error {
 				errorDec = true
 				return true
 			} else {
-				fmt.Println("offset", offset)
 				// Faz a cópia dos binários que são decodados, deixando de lado os que estão dando erro
-				// para fazer a cópia vamos offset, destination
+				// para fazer a cópia vamos precisar offset, destination
 				// precisamos fazer o rename
-				// cc.binaryCopy(int64(len(data)) + 4)
+				fh.binaryCopy(offset, int64(len(data))+4)
 			}
 
 			return true
@@ -150,8 +145,6 @@ func Reader(binfile string) error {
 		}
 	}
 
-	cc.dst.Close()
-	cc.src.Close()
 	return nil
 }
 
@@ -176,7 +169,7 @@ func (f *FileControl) Read(offset int64) ([]byte, error) {
 
 	// caso o erro retorne diferente de nil
 	if err != nil {
-		fmt.Printf("Erro ao abrir o arquivo [%s]", err.Error())
+		fmt.Printf("Erro ao abrir o arquivo [%v]", err)
 		return nil, err
 	}
 	defer fh.Close()
@@ -185,7 +178,6 @@ func (f *FileControl) Read(offset int64) ([]byte, error) {
 	// se o offset é maior que o próprio tamanho do arquivo
 	// ou se o erro é diferente de null
 	if fi, err := fh.Stat(); offset >= fi.Size() || err != nil {
-		fmt.Printf("Erro na validação do arquivo [%s]", err.Error())
 		return nil, io.EOF
 	}
 
@@ -193,7 +185,7 @@ func (f *FileControl) Read(offset int64) ([]byte, error) {
 	_, err = fh.Seek(offset, os.SEEK_SET)
 
 	if err != nil {
-		fmt.Printf("Erro no seek: [%s]", err.Error())
+		fmt.Printf("Erro no seek: [%v]", err)
 		return nil, err
 	}
 
@@ -205,7 +197,7 @@ func (f *FileControl) Read(offset int64) ([]byte, error) {
 	_, err = fh.Read(b)
 
 	if err != nil {
-		fmt.Printf("Erro ao realizar a leitura do arquivo: [%s]", err.Error())
+		fmt.Printf("Erro ao realizar a leitura do arquivo: [%v]", err)
 		return nil, err
 	}
 
@@ -237,53 +229,45 @@ func BinaryToInt32(b []byte) (val int32) {
 	return val
 }
 
-// CopyBinary
-func (f *FileControl) CopyBinary(offset int64) (int64, error) {
-	var bytes int64
+// binaryCopy faz a cópia dos binários funcionais para um arquivo temporário e ignora os corrompidos
+func (fc *FileControl) binaryCopy(offset int64, binary_size int64) (int, error) {
+	var bytes int
 
-	src, err := os.Open(f.path)
+	src, err := os.Open(fc.path)
 
 	if err != nil {
 		fmt.Printf("Erro ao abrir o arquivo [%s]", err.Error())
 		return 0, err
 	}
 
-	// vamos criar o arquivo temporário que irá gravar apenas os offsets que não estão dando problema algum
-	dst, err := os.OpenFile("temp_file.bin", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0755)
+	defer src.Close()
 
-	if err != nil {
-		return 0, err
-	}
-
-	// fecha o arquivo de destino
-	defer dst.Close()
-
-	bin := make([]byte, offset)
+	_, err = src.Seek(offset, os.SEEK_SET)
+	bin := make([]byte, binary_size)
 	_, err = src.Read(bin)
 
-	bytes, err = io.CopyBuffer(dst, src, bin)
+	bytes, err = fc.dst.Write(bin)
 
 	if err != nil {
 		return 0, err
 	}
 
-	// fechamento do primeiro arquivo, arquivo source
-	src.Close()
 	return bytes, nil
 }
 
-//
-func (cc *CopyControl) binaryCopy(offset int64) (int64, error) {
-	var bytes int64
+func RenameFile(src, dst string) {
+	// Arquivo de entrada e arquivo de saída
 
-	bin := make([]byte, offset)
-	_, err := cc.src.Read(bin)
-
-	bytes, err = io.CopyBuffer(cc.dst, cc.src, bin)
-
-	if err != nil {
-		return 0, err
+	if _, err := os.Stat(src); err != nil {
+		// The source does not exist or some other error accessing the source
+		log.Fatal("Erro ao verificar o arquivo de entrada:", err)
+	}
+	if _, err := os.Stat(dst); err != nil {
+		// The destination exists or some other error accessing the destination
+		log.Fatal("Erro ao verificar o arquivo temporário:", err)
+	}
+	if err := os.Rename(dst, src); err != nil {
+		log.Fatal(err)
 	}
 
-	return bytes, nil
 }
