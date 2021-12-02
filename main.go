@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"strings"
 	"sync"
 
 	"github.com/ugorji/go/codec"
@@ -40,8 +41,8 @@ func main() {
 	defer func() {
 		if r := recover(); r != nil {
 			stack := debug.Stack()
-			fmt.Println("Recuperado de ", r)
-			fmt.Println("Stack ", string(stack))
+			fmt.Println(" Recuperado de ", r)
+			fmt.Println(" Stack ", string(stack))
 			return
 		}
 	}()
@@ -52,13 +53,13 @@ func main() {
 
 	//verifica se o arquivo existe, foi passado
 	if (binfile) == "" {
-		log.Fatal("Arquivo não existe")
+		log.Fatal(" Arquivo não existe")
 	}
 
 	err := Reader(binfile)
 
 	if err != nil {
-		log.Fatal("Houve erro ao ler e decodar o arquivo binário", err.Error())
+		log.Fatal(" Houve erro ao ler e decodar o arquivo binário", err.Error())
 	}
 }
 
@@ -70,7 +71,7 @@ func Reader(binfile string) error {
 	fh.dst, err = os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0755)
 
 	if fh == nil {
-		log.Fatal("Erro na leitura do arquivo")
+		log.Fatal(" Erro na leitura do arquivo")
 	}
 
 	// fecha os arquivos
@@ -79,6 +80,19 @@ func Reader(binfile string) error {
 
 	if err != nil {
 		return err
+	}
+
+	// Verifica se já existe um arquivo bkp, caso exista retorna e não executa o resto do script
+	if fh.isBackupExists() {
+		log.Fatal(" Não vamos executar o script pois o mesmo já foi executado e um arquivo de backup criado.")
+	}
+
+	// Cria um backup do arquivo com erro, caso seja necessário usá-lo
+	// em algum momento
+	err = fh.backupFile()
+
+	if err != nil {
+		log.Fatal(" Erro na criação do backup do arquivo")
 	}
 
 	// define o inicio do offset
@@ -108,11 +122,11 @@ func Reader(binfile string) error {
 				if errors.Is(err, io.EOF) {
 
 					// caso seja final do arquivo, finaliza o script e renomeia
-					RenameFile(fh.path, dst)
-					fmt.Printf("Fim do arquivo! [%s]", err.Error())
+					renameFile(fh.path, dst)
+					log.Fatalf(" Fim do arquivo! [%s]", err.Error())
 				}
 
-				log.Fatalf("Houve erro no retorno de dados! [%s]", err.Error())
+				log.Fatalf(" Houve erro no retorno de dados! [%s]", err.Error())
 			}
 
 			var (
@@ -128,7 +142,7 @@ func Reader(binfile string) error {
 			err = dec.Decode(&urlData)
 
 			if err != nil {
-				fmt.Printf("Houve um erro ao fazer o decode com o MsgpackHandle: offset [%d],com o seguinte path [%s] e o erro [%s]\n", offset, binfile, err.Error())
+				fmt.Printf(" Houve um erro ao fazer o decode com o MsgpackHandle: offset [%d],com o seguinte path [%s] e o erro [%s]\n", offset, binfile, err.Error())
 				errorDec = true
 				return true
 			} else {
@@ -151,7 +165,7 @@ func Reader(binfile string) error {
 func NewFileReader(path string) *FileControl {
 	fh, err := os.OpenFile(path, os.O_RDONLY, 0755)
 	if err != nil {
-		fmt.Printf("Erro ao abrir o arquivo %s", err.Error())
+		fmt.Printf(" Erro ao abrir o arquivo %s", err.Error())
 		return nil
 	}
 
@@ -169,7 +183,7 @@ func (f *FileControl) Read(offset int64) ([]byte, error) {
 
 	// caso o erro retorne diferente de nil
 	if err != nil {
-		fmt.Printf("Erro ao abrir o arquivo [%v]", err)
+		fmt.Printf(" Erro ao abrir o arquivo [%v]", err)
 		return nil, err
 	}
 	defer fh.Close()
@@ -185,7 +199,7 @@ func (f *FileControl) Read(offset int64) ([]byte, error) {
 	_, err = fh.Seek(offset, os.SEEK_SET)
 
 	if err != nil {
-		fmt.Printf("Erro no seek: [%v]", err)
+		fmt.Printf(" Erro no seek: [%v]", err)
 		return nil, err
 	}
 
@@ -197,13 +211,13 @@ func (f *FileControl) Read(offset int64) ([]byte, error) {
 	_, err = fh.Read(b)
 
 	if err != nil {
-		fmt.Printf("Erro ao realizar a leitura do arquivo: [%v]", err)
+		fmt.Printf(" Erro ao realizar a leitura do arquivo: [%v]", err)
 		return nil, err
 	}
 
 	// faz a conversão dos de binary para Int32
 	// o tamanho é definição dos próximos bytes que serão lidos
-	v := BinaryToInt32(b)
+	v := binaryToInt32(b)
 
 	if v < 0 || v > 200 {
 		return nil, err
@@ -219,7 +233,7 @@ func (f *FileControl) Read(offset int64) ([]byte, error) {
 }
 
 // BinaryToInt32 função qque faz a conversão de bytes para int32
-func BinaryToInt32(b []byte) (val int32) {
+func binaryToInt32(b []byte) (val int32) {
 	buf := bytes.NewBuffer(b)
 	err := binary.Read(buf, binary.LittleEndian, &val)
 
@@ -236,7 +250,7 @@ func (fc *FileControl) binaryCopy(offset int64, binary_size int64) (int, error) 
 	src, err := os.Open(fc.path)
 
 	if err != nil {
-		fmt.Printf("Erro ao abrir o arquivo [%s]", err.Error())
+		fmt.Printf(" Erro ao abrir o arquivo [%s]", err.Error())
 		return 0, err
 	}
 
@@ -255,19 +269,84 @@ func (fc *FileControl) binaryCopy(offset int64, binary_size int64) (int, error) 
 	return bytes, nil
 }
 
-func RenameFile(src, dst string) {
+func (fc *FileControl) backupFile() error {
+	ext := filepath.Ext(fc.path)
+	nameFile := fc.getNameFile()
+	bkp := nameFile + "_bkp" + ext
+
+	err := copy(fc.path, bkp)
+
+	return err
+}
+
+func copy(src, dst string) error {
+
+	checkStatFile, err := os.Stat(src)
+
+	if err != nil {
+		return err
+	}
+
+	if !checkStatFile.Mode().IsRegular() {
+		return fmt.Errorf(" %s não é um arquivo regular", src)
+	}
+
+	source, err := os.Open(src)
+
+	if err != nil {
+		return err
+	}
+
+	defer source.Close()
+
+	destination, err := os.Create(dst)
+
+	if err != nil {
+		return err
+	}
+
+	defer destination.Close()
+
+	io.Copy(destination, source)
+
+	return nil
+}
+
+func (fc *FileControl) isBackupExists() bool {
+
+	nameFile := fc.getNameFile()
+	binFile := nameFile + "_bkp.bin"
+	match, _ := filepath.Glob(binFile)
+
+	if len(match) > 0 {
+		return true
+	}
+
+	return false
+}
+
+// renameFile
+func renameFile(src, dst string) {
 	// Arquivo de entrada e arquivo de saída
 
 	if _, err := os.Stat(src); err != nil {
 		// The source does not exist or some other error accessing the source
-		log.Fatal("Erro ao verificar o arquivo de entrada:", err)
+		log.Fatal(" Erro ao verificar o arquivo de entrada:", err)
 	}
 	if _, err := os.Stat(dst); err != nil {
 		// The destination exists or some other error accessing the destination
-		log.Fatal("Erro ao verificar o arquivo temporário:", err)
+		log.Fatal(" Erro ao verificar o arquivo temporário:", err)
 	}
 	if err := os.Rename(dst, src); err != nil {
 		log.Fatal(err)
 	}
 
+}
+
+// getNameFile retorna o path junto com o nome do arquivo
+func (fc *FileControl) getNameFile() string {
+	ext := filepath.Ext(fc.path)
+	nameFile := strings.TrimSuffix(fc.path, ext)
+
+	return nameFile
 }
